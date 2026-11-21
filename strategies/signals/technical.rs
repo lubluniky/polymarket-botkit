@@ -3,6 +3,8 @@
 use crate::types::{MarketData, Signal, SignalType, SignalMetadata, SignalGenerator};
 use std::collections::{HashMap, VecDeque};
 use chrono::Utc;
+use fin_primitives::signals::{indicators::Rsi, BarInput, Signal as _};
+use rust_decimal::{prelude::ToPrimitive, Decimal};
 
 /// Simple Moving Average indicator
 pub struct SimpleMovingAverage {
@@ -144,57 +146,32 @@ impl SignalGenerator for ExponentialMovingAverage {
     }
 }
 
-/// Relative Strength Index indicator
+/// Relative Strength Index indicator (Wilder smoothing, via fin-primitives)
 pub struct RelativeStrengthIndex {
     period: usize,
-    gains: VecDeque<f64>,
-    losses: VecDeque<f64>,
-    prev_price: Option<f64>,
+    rsi: Rsi,
+    last: Option<f64>,
 }
 
 impl RelativeStrengthIndex {
     pub fn new(period: usize) -> Self {
         Self {
             period,
-            gains: VecDeque::with_capacity(period),
-            losses: VecDeque::with_capacity(period),
-            prev_price: None,
+            rsi: Rsi::new("rsi", period).expect("RSI period must be > 0"),
+            last: None,
         }
     }
 
     pub fn update(&mut self, price: f64) {
-        if let Some(prev) = self.prev_price {
-            let change = price - prev;
-            if change > 0.0 {
-                self.gains.push_back(change);
-                self.losses.push_back(0.0);
-            } else {
-                self.gains.push_back(0.0);
-                self.losses.push_back(-change);
-            }
-
-            if self.gains.len() > self.period {
-                self.gains.pop_front();
-                self.losses.pop_front();
+        if let Ok(close) = Decimal::try_from(price) {
+            if let Ok(v) = self.rsi.update(&BarInput::from_close(close)) {
+                self.last = v.as_decimal().and_then(|d| d.to_f64());
             }
         }
-        self.prev_price = Some(price);
     }
 
     pub fn value(&self) -> Option<f64> {
-        if self.gains.len() < self.period {
-            return None;
-        }
-
-        let avg_gain = self.gains.iter().sum::<f64>() / self.period as f64;
-        let avg_loss = self.losses.iter().sum::<f64>() / self.period as f64;
-
-        if avg_loss < 1e-10 {
-            return Some(100.0);
-        }
-
-        let rs = avg_gain / avg_loss;
-        Some(100.0 - (100.0 / (1.0 + rs)))
+        self.last
     }
 }
 
@@ -222,7 +199,7 @@ impl SignalGenerator for RelativeStrengthIndex {
             market_id: data.market.clone(),
             signal_type,
             strength,
-            confidence: if self.gains.len() >= self.period { 1.0 } else { 0.5 },
+            confidence: if self.rsi.is_ready() { 1.0 } else { 0.5 },
             metadata: {
                 let mut m = HashMap::new();
                 m.insert("rsi".to_string(), format!("{:.2}", rsi));
@@ -455,5 +432,17 @@ mod tests {
         assert!(value.is_some());
         let v = value.unwrap();
         assert!(v >= 0.0 && v <= 100.0);
+    }
+
+    #[test]
+    fn test_rsi_wilder_smoothing() {
+        // Changes +1, +1, -1, +1 with period 2. Wilder: seed avg 1/0, then
+        // gain 0.5/loss 0.5, then gain 0.75/loss 0.25 -> RS 3 -> RSI 75.
+        // A rolling-window (Cutler) average of the last two changes gives 50.
+        let mut rsi = RelativeStrengthIndex::new(2);
+        for p in [10.0, 11.0, 12.0, 11.0, 12.0] {
+            rsi.update(p);
+        }
+        assert!((rsi.value().unwrap() - 75.0).abs() < 1e-9);
     }
 }
