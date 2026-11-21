@@ -34,6 +34,8 @@ parking_lot = "0.12"  # Better synchronization primitives
 # Statistics and math
 statrs = "0.16"
 nalgebra = "0.32"
+fin-primitives = { version = "4.0.1", default-features = false, features = ["indicators"] }
+rust_decimal = { version = "1.36", default-features = false, features = ["std"] }
 
 # Random number generation
 rand = "0.8"
